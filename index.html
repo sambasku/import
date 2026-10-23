@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Impor Lemma - Kamus Sambas-Indonesia</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      @keyframes marchingAnts {
+        0% {
+          background-position: 0 0, 100% 0, 100% 100%, 0 100%;
+        }
+        100% {
+          background-position: 16px 0, 100% 16px, calc(100% - 16px) 100%, 0 calc(100% - 16px);
+        }
+      }
+      .marching-ants-top {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: repeating-linear-gradient(90deg, #107c41, #107c41 4px, #ffffff 4px, #ffffff 8px);
+        animation: marchH 0.4s linear infinite;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .marching-ants-bottom {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: repeating-linear-gradient(90deg, #107c41, #107c41 4px, #ffffff 4px, #ffffff 8px);
+        animation: marchH 0.4s linear infinite reverse;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .marching-ants-left {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 2px;
+        background: repeating-linear-gradient(180deg, #107c41, #107c41 4px, #ffffff 4px, #ffffff 8px);
+        animation: marchV 0.4s linear infinite reverse;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .marching-ants-right {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        right: 0;
+        width: 2px;
+        background: repeating-linear-gradient(180deg, #107c41, #107c41 4px, #ffffff 4px, #ffffff 8px);
+        animation: marchV 0.4s linear infinite;
+        z-index: 10;
+        pointer-events: none;
+      }
+      @keyframes marchH {
+        0% { background-position: 0 0; }
+        100% { background-position: 8px 0; }
+      }
+      @keyframes marchV {
+        0% { background-position: 0 0; }
+        100% { background-position: 0 8px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

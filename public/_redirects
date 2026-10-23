@@ -1,0 +1,4 @@
+# SPA fallback untuk Cloudflare Pages.
+# Tanpa router history mode - deep-link / refresh (mis. /) harus
+# tetap dilayani index.html, bukan 404.
+/* /index.html 200

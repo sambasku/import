@@ -1,0 +1,21 @@
+/**
+ * Cloudflare Pages config - deploy ke import.sambasku.com (main branch only).
+ *
+ * Setup sekali di Cloudflare (manual):
+ * 1. Project `sambasku-import` dibuat otomatis oleh deploy pertama.
+ * 2. Attach custom domain: Workers & Pages → sambasku-import →
+ *    Custom domains → add `import.sambasku.com`.
+ * 3. Pastikan `CORS_ALLOWED_ORIGINS` API produksi
+ *    (api/wrangler.toml → [vars]) memuat https://import.sambasku.com.
+ *
+ * Deploy: push ke main → lint + test + build → `wrangler pages deploy dist`.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sambasku-import",
+  "compatibility_date": "2025-09-01",
+  "pages": {
+    "bucket": "./dist",
+    "binding": "ASSETS"
+  }
+}

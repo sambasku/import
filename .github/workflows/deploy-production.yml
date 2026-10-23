@@ -1,0 +1,124 @@
+name: Deploy Import (Production)
+
+# Deploy murni lewat CI/CD (GitHub Actions → wrangler pages deploy).
+#
+# Setup sekali di Cloudflare (manual):
+#   1. Pastikan zone sambasku.com ada di akun Cloudflare yang sama.
+#   2. Project Pages `sambasku-import` dibuat otomatis oleh job ini.
+#   3. Attach custom domain: Workers & Pages → sambasku-import →
+#      Custom domains → add `import.sambasku.com`.
+#   4. CORS API production harus memuat `https://import.sambasku.com`
+#      (api/wrangler.toml → [vars] CORS_ALLOWED_ORIGINS).
+#
+# Secrets repo (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   - izin "Cloudflare Pages: Edit"
+#   CLOUDFLARE_ACCOUNT_ID  - Account ID Cloudflare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-import-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build (production)
+        run: pnpm build
+        env:
+          VITE_API_BASE_URL: https://api.sambasku.com/api/v1
+          VITE_API_BASE_URL_FALLBACKS: https://render.sambasku.com/api/v1
+          VITE_APP_NAME: SambasKu - Web Import
+
+      - name: Pastikan project Cloudflare Pages ada
+        run: >
+          pnpm dlx wrangler pages project create sambasku-import
+          --production-branch=main
+          || echo "Project sudah ada - lanjut deploy."
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy ke Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=sambasku-import --branch=main
+
+      # Assertion security headers: verifikasi header wajib terpasang
+      - name: Verifikasi security headers
+        run: |
+          headers=$(curl -sI --retry 5 --retry-all-errors --retry-delay 3 https://import.sambasku.com/)
+          echo "$headers"
+          echo "$headers" | grep -qi 'content-security-policy:' || { echo 'CSP tidak ada'; exit 1; }
+          for host in api.sambasku.com render.sambasku.com; do
+            echo "$headers" | grep -i 'content-security-policy:' | grep -q "$host" || { echo "CSP tidak memuat $host"; exit 1; }
+          done
+          echo "$headers" | grep -qi 'x-frame-options: deny' || { echo 'X-Frame-Options DENY tidak ada'; exit 1; }
+          echo "$headers" | grep -qi 'strict-transport-security:' || { echo 'HSTS tidak ada'; exit 1; }
+
+  notify:
+    needs: [deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kirim hasil CI ke Telegram
+        uses: appleboy/telegram-action@v1.1.0
+        with:
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          to: ${{ secrets.TELEGRAM_TO }}
+          message: |
+            ${{ contains(needs.*.result, 'failure') && '❌ Gagal' || (contains(needs.*.result, 'cancelled') && '⚠️ Dibatalkan' || '✅ Sukses') }} CI sambasku/import - Deploy Import (Production)
+            Branch: ${{ github.ref_name }} · Commit: ${{ github.sha }}
+            https://github.com/sambasku/import/actions/runs/${{ github.run_id }}
+      - name: Kirim hasil CI ke Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATUS: "${{ contains(needs.*.result, 'failure') && '❌ Gagal' || (contains(needs.*.result, 'cancelled') && '⚠️ Dibatalkan' || '✅ Sukses') }}"
+          REPO: sambasku/import
+          WORKFLOW: Deploy Import (Production)
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: "https://github.com/sambasku/import/actions/runs/${{ github.run_id }}"
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Skip: DISCORD_WEBHOOK_URL tidak diset."
+            exit 0
+          fi
+          MSG="$STATUS CI $REPO - $WORKFLOW
+          Branch: $BRANCH · Commit: $SHA
+          $RUN_URL"
+          jq -n --arg content "$MSG" '{"content": $content}' \
+            | curl -sf -X POST -H 'Content-Type: application/json' \
+                -d @- "$DISCORD_WEBHOOK_URL" \
+            || echo "Discord webhook gagal (best-effort, job tidak gagal)"
