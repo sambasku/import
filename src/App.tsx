@@ -196,7 +196,7 @@ export function App() {
         setAlertInfo({ type: 'error', message: data.error?.message ?? data.message ?? 'Gagal mengirim data.' });
       }
     } catch {
-      setAlertInfo({ type: 'error', message: 'Gagal terhubung ke server API. Periksa koneksi internet.' });
+      setAlertInfo({ type: 'error', message: 'Gagal terhubung ke server API. Coba lagi dalam beberapa saat.' });
     } finally {
       setIsSubmitting(false);
     }
