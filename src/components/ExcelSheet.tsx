@@ -8,7 +8,7 @@ import {
   type MouseEvent,
 } from 'react';
 import { LIMITS, normalizeType, sanitizeCell, validateSheet, type Severity } from '../lib/validate';
-import { API_BASE_URL } from '../lib/api';
+import { API_BASE_URL, checkLemma } from '../lib/api';
 
 export interface WordClassOption {
   id: string;
@@ -129,6 +129,10 @@ const [copiedRange, setCopiedRange] = useState<{ r1: number; r2: number; c1: num
 const [typeDropdown, setTypeDropdown] = useState<{ row: number; col: number; top: number; left: number; width: number } | null>(null);
 const [typeHoverIdx, setTypeHoverIdx] = useState(0);
   const [wordClasses, setWordClasses] = useState<WordClassOption[]>([]);
+  // Cache hasil cek lemma di server: Map<lemma_lower, boolean> (true = ada di DB, false = tidak ada)
+  const [lemmaExists, setLemmaExists] = useState<Map<string, boolean>>(() => new Map());
+  // Kumpulan lemma yang saat ini sedang dalam antrean / sedang dikirim request pengecekannya
+  const [checkingLemma, setCheckingLemma] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     fetchWordClasses().then(setWordClasses);
@@ -140,6 +144,70 @@ const formulaInputRef = useRef<HTMLInputElement>(null);
 const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typeDropdownRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef<Record<string, HTMLTableCellElement | null>>({});
+  // Simpan timers debounce per-lemma
+  const lemmaDebounceTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Simpan AbortController per-lemma
+  const lemmaAbortControllers = useRef<Map<string, AbortController>>(new Map());
+
+  // Trigger cek lemma ke server (debounced 400ms, non-blocking)
+  const queueCheckLemma = useCallback((rawLemma: string) => {
+    const lemma = rawLemma.trim();
+    const key = lemma.toLowerCase();
+    if (lemma.length < 2) return;
+
+    // Jika sudah pernah dicek dan hasilnya ada di cache, skip fetch
+    if (lemmaExists.has(key)) return;
+
+    // Batalkan timer debounce lama untuk kata ini jika ada
+    const existingTimer = lemmaDebounceTimers.current.get(key);
+    if (existingTimer) clearTimeout(existingTimer);
+
+    // Batalkan request in-flight lama jika ada
+    const existingAbort = lemmaAbortControllers.current.get(key);
+    if (existingAbort) existingAbort.abort();
+
+    const controller = new AbortController();
+    lemmaAbortControllers.current.set(key, controller);
+
+    const timer = setTimeout(async () => {
+      setCheckingLemma((prev) => new Set(prev).add(key));
+      try {
+        const exists = await checkLemma(lemma, controller.signal);
+        if (exists !== null) {
+          setLemmaExists((prev) => new Map(prev).set(key, exists));
+        }
+      } finally {
+        setCheckingLemma((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+        lemmaDebounceTimers.current.delete(key);
+        lemmaAbortControllers.current.delete(key);
+      }
+    }, 400);
+
+    lemmaDebounceTimers.current.set(key, timer);
+  }, [lemmaExists]);
+
+  // Cek lemma secara berkala untuk kata-kata yang ada di tabel tapi belum dicek (misal setelah upload CSV)
+  useEffect(() => {
+    // Ambil maksimal 5 lemma pertama yang belum pernah dicek dan panjangnya >= 2
+    const toCheck: string[] = [];
+    for (const r of rows) {
+      const k = r.kata.trim();
+      const lower = k.toLowerCase();
+      if (k.length >= 2 && !lemmaExists.has(lower) && !checkingLemma.has(lower)) {
+        if (!toCheck.includes(k)) {
+          toCheck.push(k);
+          if (toCheck.length >= 5) break;
+        }
+      }
+    }
+    if (toCheck.length > 0) {
+      toCheck.forEach((k) => queueCheckLemma(k));
+    }
+  }, [rows, lemmaExists, checkingLemma, queueCheckLemma]);
 
   // Daftar opsi kelas kata untuk dropdown. HANYA kode standar word_classes
   // (n, v, adj, adv, prep, ...) supaya tidak ada duplikat makna. Kode CSV lama
@@ -262,9 +330,15 @@ return () => {
     if (!editing) return;
     const { row, col, value } = editing;
     const key = COLUMNS[col].key;
-    const nextRows = rows.map((r, i) => (i === row ? { ...r, [key]: value.trim() } : r));
+    const trimmedVal = value.trim();
+    const nextRows = rows.map((r, i) => (i === row ? { ...r, [key]: trimmedVal } : r));
     pushHistory(nextRows);
     setEditing(null);
+
+    // Jika yang diubah adalah kolom lema, trigger pengecekan ke server
+    if (key === 'kata' && trimmedVal) {
+      queueCheckLemma(trimmedVal);
+    }
 
     if (nextMove) {
       const nextRow = Math.max(0, Math.min(rows.length - 1, row + nextMove.rowDelta));
@@ -543,6 +617,13 @@ return () => {
     }
 
     pushHistory(nextRows);
+    // Cek semua lema baru yang baru saja di-paste
+    for (let r = 0; r < maxPasteRows; r += 1) {
+      const pastedRow = nextRows[startRow + r];
+      if (pastedRow?.kata?.trim()) {
+        queueCheckLemma(pastedRow.kata.trim());
+      }
+    }
     setRangeEnd({
       row: startRow + maxPasteRows - 1,
       col: Math.min(COLUMNS.length - 1, startCol + (matrix[0]?.length ?? 1) - 1),
@@ -727,6 +808,9 @@ return () => {
             onChangeRows(
               rows.map((r, i) => (i === selected.row ? { ...r, [key]: val } : r)),
             );
+            if (key === 'kata' && val.trim()) {
+              queueCheckLemma(val.trim());
+            }
           }}
           placeholder="Isi sel aktif..."
           style={{
@@ -915,6 +999,12 @@ return () => {
                     const isCopyLeft = copiedRange && cIdx === copiedRange.c1 && rIdx >= copiedRange.r1 && rIdx <= copiedRange.r2;
                     const isCopyRight = copiedRange && cIdx === copiedRange.c2 && rIdx >= copiedRange.r1 && rIdx <= copiedRange.r2;
 
+                    // Cek ketersediaan lemma di DB (hanya untuk kolom kata)
+                    const isKataCol = col.key === 'kata';
+                    const kataKey = val.trim().toLowerCase();
+                    const isCheckingKata = isKataCol && checkingLemma.has(kataKey);
+                    const isExistingKata = isKataCol && lemmaExists.get(kataKey) === true;
+
                     return (
 <td
                 key={col.key}
@@ -946,9 +1036,13 @@ return () => {
                 title={
                   col.key === 'type' && val
                     ? typeLabel(val)
-                    : warn && cIdx <= 1
-                      ? warn
-                      : undefined
+                    : isKataCol && isExistingKata
+                      ? `Lema "${val}" sudah ada di kamus (multi-makna / duplikat). Pastikan maknanya berbeda.`
+                      : isKataCol && isCheckingKata
+                        ? 'Memeriksa ketersediaan lema di kamus…'
+                        : warn && cIdx <= 1
+                          ? warn
+                          : undefined
                 }
                 style={{
                           width: colWidths[cIdx],
@@ -1056,16 +1150,50 @@ return () => {
                                 color: val ? '#1f1f1f' : '#aaa',
                                 textDecoration: warn && cIdx <= 1 && !isErrorRow
                               ? 'underline wavy #bf8f00'
-                              : undefined,
+                              : isKataCol && isExistingKata
+                                ? 'underline dotted #e65100'
+                                : undefined,
                               }}
                             >
                               {val}
                             </span>
-                            {warn && cIdx <= 1 && (
+                            {/* Indikator status lema: sudah ada di DB atau sedang diperiksa */}
+                            {isKataCol && isCheckingKata && (
+                              <span
+                                style={{
+                                  position: 'absolute',
+                                  right: 3,
+                                  top: 3,
+                                  width: 6,
+                                  height: 6,
+                                  borderRadius: '50%',
+                                  background: '#1976d2',
+                                  opacity: 0.8,
+                                }}
+                                title="Sedang memeriksa lema di kamus…"
+                              />
+                            )}
+                            {isKataCol && isExistingKata && !isErrorRow && (
                               <span
                                 style={{
                                   position: 'absolute',
                                   right: 1,
+                                  top: 1,
+                                  width: 0,
+                                  height: 0,
+                                  borderLeft: '5px solid transparent',
+                                  borderRight: '5px solid transparent',
+                                  borderBottom: '9px solid #e65100',
+                                  cursor: 'help',
+                                }}
+                                title="Lema ini sudah ada di kamus. Pastikan ini adalah makna baru."
+                              />
+                            )}
+                            {warn && cIdx <= 1 && (
+                              <span
+                                style={{
+                                  position: 'absolute',
+                                  right: isKataCol && isExistingKata ? 8 : 1,
                                   top: 1,
                                   width: 0,
                                   height: 0,
@@ -1238,6 +1366,23 @@ return () => {
           <span>
             {rows.filter((r) => r.kata.trim().length > 0).length} lemma terisi dari {rows.length} baris
           </span>
+          {(() => {
+            const existingCount = rows.filter((r) => {
+              const k = r.kata.trim().toLowerCase();
+              return k.length > 0 && lemmaExists.get(k) === true;
+            }).length;
+            if (existingCount === 0) return null;
+            return (
+              <span style={{ color: '#e65100', fontWeight: 600 }} title="Lemma sudah ada di kamus. Pastikan ini makna baru.">
+                ● {existingCount} lema ada di kamus
+              </span>
+            );
+          })()}
+          {checkingLemma.size > 0 && (
+            <span style={{ color: '#1976d2', fontSize: 11 }}>
+              Memeriksa {checkingLemma.size} lema…
+            </span>
+          )}
           {rowIssues.size > 0 ? (
             <>
               <span style={{ color: '#d93025', fontWeight: 600 }}>
