@@ -1,0 +1,138 @@
+name: Deploy Import (Staging)
+
+# Deploy murni lewat CI/CD (GitHub Actions → wrangler pages deploy).
+#
+# Setup sekali di Cloudflare (manual):
+#   1. Pastikan zone iamutaki.com ada di akun Cloudflare yang sama.
+#   2. Project Pages `sambasku-import-staging` dibuat otomatis oleh job ini.
+#   3. Attach custom domain: Workers & Pages → sambasku-import-staging →
+#      Custom domains → add `import-sambasku.iamutaki.com`.
+#      (DNS + sertifikat dibuat otomatis karena satu akun/zone.)
+#   4. Pastikan origin ini sudah ada di CORS_ALLOWED_ORIGINS API staging
+#      (api/wrangler.toml → env.staging.vars).
+#
+# Project Pages terpisah dari produksi karena custom domain hanya melayani
+# production deployment project-nya sendiri.
+#
+# Secrets repo (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   - izin "Cloudflare Pages: Edit"
+#   CLOUDFLARE_ACCOUNT_ID  - Account ID Cloudflare
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-import-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # VITE_* memang publik (ter-embed di bundle JS) - aman inline.
+      - name: Build (staging)
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: https://sambasku-staging.iamutaki.com/api/v1
+          VITE_APP_NAME: SambasKu - Web Import (Staging)
+
+      # CSP di public/_headers hardcode host API produksi. Tanpa patch ini,
+      # browser staging memblokir semua call ke API staging (connect-src).
+      - name: Patch _headers untuk staging
+        run: |
+          sed -i \
+            's|https://api.sambasku.com https://render.sambasku.com|https://sambasku-staging.iamutaki.com|' \
+            dist/_headers
+          grep -q 'sambasku-staging.iamutaki.com' dist/_headers \
+            || { echo 'Patch CSP gagal: host API staging tidak masuk connect-src'; exit 1; }
+
+      - name: Pastikan project Cloudflare Pages ada
+        run: >
+          npx --yes wrangler pages project create sambasku-import-staging
+          --production-branch=staging
+          || echo "Project sudah ada - lanjut deploy."
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # --branch=staging cocok dengan production-branch project → deploy ini
+      # menjadi production deployment, yang dilayani custom domain.
+      - name: Deploy ke Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=sambasku-import-staging --branch=staging
+
+      # Verifikasi security headers + CSP menunjuk API staging.
+      - name: Verifikasi security headers
+        run: |
+          headers=$(curl -sI --retry 5 --retry-all-errors --retry-delay 3 https://import-sambasku.iamutaki.com/)
+          echo "$headers"
+          echo "$headers" | grep -qi 'content-security-policy:' || { echo 'CSP tidak ada'; exit 1; }
+          echo "$headers" | grep -i 'content-security-policy:' | grep -q 'sambasku-staging.iamutaki.com' \
+            || { echo 'CSP tidak memuat host API staging'; exit 1; }
+          echo "$headers" | grep -qi 'x-frame-options: deny' || { echo 'X-Frame-Options DENY tidak ada'; exit 1; }
+          echo "$headers" | grep -qi 'strict-transport-security:' || { echo 'HSTS tidak ada'; exit 1; }
+
+  notify:
+    needs: [deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kirim hasil CI ke Telegram
+        if: env.TELEGRAM_TOKEN != '' && env.TELEGRAM_TO != ''
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+        uses: appleboy/telegram-action@v1.1.0
+        with:
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          to: ${{ secrets.TELEGRAM_TO }}
+          message: |
+            ${{ contains(needs.*.result, 'failure') && '❌ Gagal' || (contains(needs.*.result, 'cancelled') && '⚠️ Dibatalkan' || '✅ Sukses') }} CI sambasku/import - Deploy Import (Staging)
+            Branch: ${{ github.ref_name }} · Commit: ${{ github.sha }}
+            https://github.com/sambasku/import/actions/runs/${{ github.run_id }}
+      - name: Kirim hasil CI ke Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATUS: "${{ contains(needs.*.result, 'failure') && '❌ Gagal' || (contains(needs.*.result, 'cancelled') && '⚠️ Dibatalkan' || '✅ Sukses') }}"
+          REPO: sambasku/import
+          WORKFLOW: Deploy Import (Staging)
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: "https://github.com/sambasku/import/actions/runs/${{ github.run_id }}"
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Skip: DISCORD_WEBHOOK_URL tidak diset."
+            exit 0
+          fi
+          MSG="$STATUS CI $REPO - $WORKFLOW
+          Branch: $BRANCH · Commit: $SHA
+          $RUN_URL"
+          jq -n --arg content "$MSG" '{"content": $content}' \
+            | curl -sf -X POST -H 'Content-Type: application/json' \
+                -d @- "$DISCORD_WEBHOOK_URL" \
+            || echo "Discord webhook gagal (best-effort, job tidak gagal)"
